@@ -1,0 +1,263 @@
+﻿from bs4 import BeautifulSoup
+import requests
+from lxml import html
+from urllib.parse import urljoin
+import urllib.request
+import csv
+import pandas as pd
+from datetime import datetime
+import re
+import numpy as np
+import matplotlib.pyplot as plt
+import numpy as np
+import datetime
+import matplotlib.dates as mdates
+import seaborn as sns
+import collections
+from matplotlib import rcParams
+import matplotlib.patches as mpatches
+from wordcloud import WordCloud, STOPWORDS
+
+url = 'https://www.tdcj.texas.gov/death_row/dr_executed_offenders.html'
+
+################################### GET DATA ##############################################
+def get_last_words_url(inmate_row):
+    tds = inmate_row.select('td')
+    lastword_td = tds[2]
+    link = lastword_td.select('a')[0]
+    href = link.attrs['href']
+    return urljoin(url, href)
+
+
+def demographic_info(inmate):
+    tds = inmate.select('td')
+    demographics = tds[1]
+    link = demographics.select('a')[0]
+    href = link.attrs['href']
+    return urljoin(url, href)
+
+def get_rows():
+    html = requests.get(url).text
+    soup = BeautifulSoup(html, 'lxml')
+    inmate_rows = soup.find_all('tr')[1:]
+    return inmate_rows
+
+with open(r'executed.csv', mode='w', encoding="utf-8") as inmates:
+    columnTitleRow = "execution_num, tcdj_num, education, age_offense, race, date_executed, last_words \n"
+    inmates.write(columnTitleRow)
+
+    for row in get_rows():
+        execution_num = row.select('td')[0].text
+        # last words
+        lastwords_url = get_last_words_url(row)
+        # fetch page
+        html = requests.get(lastwords_url).text
+        soup = BeautifulSoup(html, 'lxml')
+        par = soup.select("p")
+        last_statement_attributes = []
+        last_statement = []
+        for i in range(1, (len(par) - 1)):
+            # get last statements
+            last_statement.append(par[i + 1].get_text())
+            # get attributes of last statement
+            last_statement_attributes.append(par[i].get_text())
+        if "Last Statement" in last_statement:
+            last_statement.remove("Last Statement:")
+        last_words = '\n'.join(last_statement[3:])
+        last_words = last_words.replace("Last Statement:", '')
+        last_words = re.sub("[’,'â\"“]+", "", last_words)
+        last_words = " ".join(last_words.split())
+
+        # get demographics
+        demo_url = demographic_info(row)
+        html2 = requests.get(demo_url).text
+        soup2 = BeautifulSoup(html2, 'lxml')
+        rows = soup2.find_all('tr')
+        attributes = []
+        for i in rows:
+            cols = i.select('td')
+            attributes.append(i.get_text().strip())
+
+        if len(attributes) >= 8:
+            education = re.sub("[^0-9]", "", attributes[5].split('\n')[1])
+            age_offense = attributes[7].split('\n')[1]
+
+        else:
+            education = ''
+            age_offense = ''
+
+        # print to CSV
+        race = row.select('td')[8].text
+        execution_num = row.select('td')[0].text
+        tcdj_num = row.select('td')[5].text
+        date_executed = row.select('td')[7].text
+        line = execution_num + ',' + tcdj_num + "," + education + ', ' + age_offense + ', ' + race + ', ' + date_executed  + ', ' + last_words + "\n"
+        inmates.write(line)
+        print(line) # confirm code is running
+
+####################### GET SENTIMENT VALUES ################################
+inmates = pd.read_csv(r'executed.csv')
+
+# format data
+inmates.columns = inmates.columns.str.strip()
+inmates['date_executed'] = inmates['date_executed'].str.strip()
+inmates['date_executed'].replace('', np.nan, inplace=True)
+inmates['date_executed'] =  pd.to_datetime(inmates['date_executed'], format='%m/%d/%Y')
+inmates.race = inmates.race.replace('Histpanic', 'Hispanic')
+inmates['year'] = inmates['date_executed'].dt.year
+inmates['last_words'].replace(' ', np.nan, inplace=True)
+inmates['date_executed'] = inmates['date_executed'].astype(str).str.strip()
+inmates['age_offense'].replace(' ', np.nan, inplace=True)
+inmates_last_words = inmates.dropna(subset = ['last_words'])
+inmates['race'] = inmates['race'].str.strip()
+
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+analyzer = SentimentIntensityAnalyzer()
+sentiment = inmates_last_words['last_words'].apply(lambda x: analyzer.polarity_scores(x))
+sentiment_inmates = pd.concat([inmates_last_words,sentiment.apply(pd.Series)],1)
+print(sentiment_inmates.describe())
+
+########################## CREATE VISUALIZATIONS ##################################
+sentiment_inmates['race'] = sentiment_inmates['race'].str.strip()
+sentiment_inmates.race = sentiment_inmates.race.replace('Histpanic', 'Hispanic')
+
+# create sentiment plot
+fig = plt.figure(figsize=(20,5))
+ax = fig.add_subplot(111)
+colors = {'Black':'red', 'White':'blue', 'Hispanic':'yellow', 'Other':'green'}
+ax.scatter(sentiment_inmates['year'],sentiment_inmates['compound'], c=sentiment_inmates['race'].apply(lambda x: colors[x]))
+ax.set(xlabel='Year', ylabel='Sentiment')
+patchList = []
+for key in colors:
+  data_key = mpatches.Patch(color=colors[key], label=key)
+  patchList.append(data_key)
+plt.legend(handles=patchList)
+plt.savefig('legend.png', bbox_inches='tight')
+fig.tight_layout()
+plt.subplots_adjust(top=0.88)
+plt.title('Sentiment of Last Words Over Time')
+plt.savefig(r"sentiment.png")
+plt.clf()
+
+#create stopwords and word list
+# convert to string type
+inmates['last_words']= inmates['last_words'].astype(str)
+print(type(inmates['last_words']))
+all_last_words = ' '.join(inmates['last_words'].str.lower())
+stopwords = STOPWORDS
+words_to_drop = ['will', 'im', 'you.', 'me.', 'yes', 'nan']
+for i in words_to_drop: 
+    stopwords.add(i)
+
+# create list 
+filtered_words = [word for word in all_last_words.split() if word not in stopwords]
+counted_words = collections.Counter(filtered_words)
+words = []
+counts = []
+for letter, count in counted_words.most_common(25):
+    words.append(letter)
+    counts.append(count)
+    
+
+# bar plot
+rcParams['figure.figsize'] = 20, 10
+plt.title('Top Words in Last Statements')
+plt.xlabel('Count')
+plt.ylabel('Words')
+plt.barh(words, counts)
+plt.show()
+plt.savefig(r"WordPlot.png")
+plt.clf()
+
+
+wordcloud = WordCloud(stopwords=stopwords, background_color="white", max_words=1000).generate(all_last_words)
+#wordcloud 
+rcParams['figure.figsize'] = 10, 20
+plt.imshow(wordcloud)
+plt.axis("off")
+plt.show()
+plt.savefig(r'WordCloud')
+plt.clf()
+# convert dates to date time format and get year and data/month intervals
+inmates['date_executed'] =  pd.to_datetime(inmates['date_executed'], format='%Y-%m-%d')
+inmates['year'] = inmates['date_executed'].dt.year
+inmates['month'] = inmates['date_executed'].dt.month
+
+# count how many executions happened per year/per month
+inmates['ex_per_year'] = inmates.groupby('year')['year'].transform('count')
+inmates['ex_per_month'] = inmates.groupby('month')['month'].transform('count')
+
+# create dataframe that only includes inmates with an execution date 
+inmates_with_date = inmates[inmates['ex_per_month'].notnull() & inmates['ex_per_year'].notnull()]
+
+# plot by year 
+plt.rc('axes', titlesize=1)  
+sns.set(font_scale=0.75, rc={"lines.linewidth": 0.8})
+sns.set_context("paper")
+line_years = sns.pointplot(x="year", y="ex_per_year", kind="line", legend="full", data=inmates_with_date)
+line_years.set_xlabel("Year", fontsize=10)
+line_years.set_xticklabels(line_years.get_xticklabels(), rotation=90)
+line_years.set_ylabel("Number of Executions")
+plt.subplots_adjust(top=0.88)
+plt.title('Executions Per Year')
+plt.tight_layout()
+plt.savefig(r"Executions Per Year.png")
+
+plt.clf()
+
+inmates['ex_per_race'] = inmates.groupby('race')['race'].transform('count')
+inmates['ex_by_edu'] = inmates.groupby('education')['education'].transform('count')
+
+plt.clf()
+race_bar = sns.barplot(inmates['race'], inmates['ex_per_race'], estimator=lambda x: len(x) / len(inmates) * 100)
+race_bar.set_xlabel("Race", fontsize=10)
+race_bar.set_ylabel("Percent of Executions")
+plt.tight_layout()
+plt.subplots_adjust(top=0.88)
+plt.title('Executions by Race')
+plt.savefig(r"Executions by Race.png")
+
+plt.clf()
+edu_bar = sns.barplot(inmates['education'],inmates['ex_by_edu'])
+edu_bar.set_xlabel("Education", fontsize=10)
+edu_bar.set_ylabel("Number of Executions")
+plt.title('Executions by Education')
+plt.tight_layout()
+plt.subplots_adjust(top=0.88)
+plt.savefig(r"Executions by Education.png")
+
+inmates_w_age = inmates.dropna(subset = ['age_offense'])
+inmates_w_age['numeric_age'] = inmates_w_age['age_offense'].astype(str).astype(int)
+
+
+plt.clf()
+age_hist = sns.distplot(inmates_w_age['numeric_age'])
+age_hist.set_xlabel("Age of Offense")
+plt.tight_layout()
+plt.subplots_adjust(top=0.88)
+plt.title('Distribution of Age of Offense')
+plt.savefig(r"Age of Offense Hist.png")
+
+plt.clf()
+boxplot = sns.boxplot(x="race", y="numeric_age", data= inmates_w_age, palette="PRGn", orient = 'v')
+_ = plt.xlabel('Race')
+_ = plt.ylabel('Age of Offense')
+plt.title('Age of Offense and Race')
+plt.tight_layout()
+plt.subplots_adjust(top=0.88)
+plt.savefig(r"Boxplot.png")
+
+plt.clf()
+fig, ax = plt.subplots()
+fig.set_size_inches((12,4))
+sns.lineplot(x='month',y='ex_per_month',data=inmates_with_date,ax=ax)
+_ = plt.xlabel('Month')
+_ = plt.ylabel('Number of Executions')
+plt.tight_layout()
+plt.subplots_adjust(top=0.88)
+plt.title('Executions Per Month')
+plt.show()
+plt.savefig(r"ExebyMonth.png")
+
+
+
